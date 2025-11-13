@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Neuron Voltage Animation</title>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: sans-serif; }
+    #controls {
+      position: absolute;
+      top: 10px; left: 10px;
+      background: rgba(255,255,255,0.8);
+      padding: 10px; border-radius: 5px;
+      z-index: 10;
+    }
+    #voltageGraph {
+      position: absolute;
+      top: 10px; right: 10px;
+      width: 300px; height: 150px;
+      background: rgba(255,255,255,0.8);
+      border-radius: 5px;
+      padding: 5px;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+<div id="controls">
+  <button id="playPause">Play</button>
+  <input type="range" id="timeSlider" min="0" max="0" value="0" step="1" style="width: 200px;">
+</div>
+<canvas id="voltageGraph"></canvas>
+<script type="module">
+  import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.154/build/three.module.js';
+  import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.154/examples/jsm/loaders/GLTFLoader.js';
+  import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.154/examples/jsm/controls/OrbitControls.js';
+
+  let scene, camera, renderer, controls;
+  let neuronMesh;
+  let voltageData;
+  let frameIndex = 0;
+  let playing = true;
+  const colorMap = (v) => {
+    // Map voltage to color from blue (low) to red (high)
+    const minV = -80, maxV = 50; // typical AP range
+    const t = Math.max(0, Math.min(1, (v - minV) / (maxV - minV)));
+    const r = t * 255;
+    const g = 0;
+    const b = (1 - t) * 255;
+    return new THREE.Color(r/255, g/255, b/255);
+  }
+
+  // Three.js setup
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xeeeeee);
+  camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 1000);
+  camera.position.set(0, 0, 50);
+  renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+  controls = new OrbitControls(camera, renderer.domElement);
+
+  // Lights
+  const light = new THREE.DirectionalLight(0xffffff, 1);
+  light.position.set(10,10,10);
+  scene.add(light);
+  scene.add(new THREE.AmbientLight(0x404040));
+
+  // Load neuron
+  const loader = new GLTFLoader();
+  loader.load('neuron_final_2.glb', (gltf) => {
+    neuronMesh = gltf.scene;
+    scene.add(neuronMesh);
+    neuronMesh.traverse((child) => {
+      if (child.isMesh) {
+        child.material = new THREE.MeshStandardMaterial({vertexColors: true});
+      }
+    });
+  });
+
+  // Load voltage data
+  fetch('voltage_data.json')
+    .then(res => res.json())
+    .then(data => {
+      voltageData = data;
+      const frames = Object.values(voltageData)[0].length;
+      document.getElementById('timeSlider').max = frames - 1;
+    });
+
+  // Animation loop
+  function animate() {
+    requestAnimationFrame(animate);
+    if (playing && neuronMesh && voltageData) updateVoltages();
+    renderer.render(scene, camera);
+    drawVoltageGraph();
+  }
+
+  function updateVoltages() {
+    frameIndex = parseInt(document.getElementById('timeSlider').value);
+    let i = 0;
+    neuronMesh.traverse((child) => {
+      if (child.isMesh) {
+        const voltages = voltageData[child.name];
+        if (!voltages) return;
+        const frameV = voltages[frameIndex];
+        const geometry = child.geometry;
+        if (!geometry.attributes.color) {
+          const count = geometry.attributes.position.count;
+          const colors = new Float32Array(count * 3);
+          geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        }
+        const colors = geometry.attributes.color.array;
+        for (let j=0;j<geometry.attributes.position.count;j++){
+          const c = colorMap(frameV); // using average voltage for mesh
+          colors[3*j] = c.r; colors[3*j+1] = c.g; colors[3*j+2] = c.b;
+        }
+        geometry.attributes.color.needsUpdate = true;
+      }
+    });
+    frameIndex++;
+    if (frameIndex >= Object.values(voltageData)[0].length) frameIndex = 0;
+    document.getElementById('timeSlider').value = frameIndex;
+  }
+
+  // Controls
+  document.getElementById('playPause').addEventListener('click', ()=>{
+    playing = !playing;
+    document.getElementById('playPause').textContent = playing ? 'Pause' : 'Play';
+  });
+
+  // Voltage graph
+  const graphCanvas = document.getElementById('voltageGraph');
+  const ctx = graphCanvas.getContext('2d');
+  function drawVoltageGraph() {
+    if (!voltageData) return;
+    const meshName = Object.keys(voltageData)[0];
+    const data = voltageData[meshName];
+    ctx.clearRect(0,0,graphCanvas.width,graphCanvas.height);
+    ctx.beginPath();
+    const w = graphCanvas.width, h = graphCanvas.height;
+    const n = data.length;
+    for (let i=0;i<n;i++){
+      const x = i/n * w;
+      const y = h - ((data[i]-(-80))/130)*h; // map -80..50 to canvas height
+      if (i===0) ctx.moveTo(x,y);
+      else ctx.lineTo(x,y);
+    }
+    ctx.strokeStyle='blue';
+    ctx.lineWidth=2;
+    ctx.stroke();
+    // Threshold line -55 mV
+    const yThresh = h - ((-55 - (-80))/130)*h;
+    ctx.beginPath();
+    ctx.moveTo(0,yThresh); ctx.lineTo(w,yThresh);
+    ctx.strokeStyle='red';
+    ctx.lineWidth=1;
+    ctx.setLineDash([5,3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  animate();
+  window.addEventListener('resize', ()=>{
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+</script>
+</body>
+</html>
